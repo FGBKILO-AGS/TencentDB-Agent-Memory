@@ -11,9 +11,10 @@
 // 反查（API 不返回归属，按日期猜会把真实会话派生的一起删掉）；L2/L3 交给
 // tam-l3-reconcile.mjs，本脚本只提示，不擅自删场景。
 import { execFileSync } from "node:child_process";
+import { gatewayKey } from "./tam-gateway-key.mjs";
 
 const CORE = process.env.TDAI_CORE || "http://127.0.0.1:8420";
-const KEY = process.env.TDAI_GATEWAY_KEY || "REPLACE_ME";
+const KEY = gatewayKey();
 const TEAM = process.env.TDAI_TEAM || "team-LOCALTEAM";
 const USER = process.env.TDAI_USER || "usr-LOCALUSER";
 const AGENTS = (process.env.TDAI_AGENTS || "agt-LOCALAGENT,agt-LOCALAGENT2,agt-LOCALAGENT3").split(",");

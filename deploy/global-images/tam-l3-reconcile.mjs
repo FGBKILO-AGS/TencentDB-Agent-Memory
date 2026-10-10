@@ -10,9 +10,10 @@
 //        node tam-l3-reconcile.mjs --apply    # 落盘修复并复验
 import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync, rmSync } from "node:fs";
+import { gatewayKey } from "./tam-gateway-key.mjs";
 
 const CORE = process.env.TDAI_CORE || "http://127.0.0.1:8420";
-const KEY = process.env.TDAI_GATEWAY_KEY || "REPLACE_ME";
+const KEY = gatewayKey();
 const TEAM = process.env.TDAI_TEAM || "team-LOCALTEAM";
 const AGENT = process.env.TDAI_AGENT || "agt-LOCALAGENT";
 const USER = process.env.TDAI_USER || "usr-LOCALUSER";

@@ -27,8 +27,15 @@ WIN_HOME="$(cd "$HOME" && pwd -W 2>/dev/null || echo "$HOME")"
 CREDS="$HOME/.dsh/.credentials.yaml"
 PATCH="$HOME/.dsh/profiles/desktop/cordis.patch.yml"
 
-# 记忆内核管理面坐标（与 tam-l3-reconcile.mjs 保持同一套默认值）
-CORE_KEY="${TDAI_GATEWAY_KEY:-REPLACE_ME}"
+# 记忆内核管理面坐标（与 tam-l3-reconcile.mjs / tam-cleanup-residue.mjs 同一套）
+# key 不许内联明文：它只活在 gitignored 的 .memory-core-config/tdai-gateway.yaml。
+# 取值口统一在 tam-gateway-key.mjs（env 优先，其次现读那份配置，取不到就报错）；
+# 静默回退到内联默认值等于把生产 key 抄进可入库的文件 —— 这条已经踩过一次。
+CORE_KEY="${TDAI_GATEWAY_KEY:-$(node "$REPO_DIR/tam-gateway-key.mjs" 2>/dev/null)}"
+if [ -z "$CORE_KEY" ]; then
+  echo "!! 拿不到管理面 key：export TDAI_GATEWAY_KEY=…，或确认 node 在 PATH 且 $REPO_DIR/.memory-core-config/tdai-gateway.yaml 存在"
+  exit 1
+fi
 TDAI_TEAM="${TDAI_TEAM:-team-LOCALTEAM}"
 TDAI_AGENT="${TDAI_AGENT:-agt-LOCALAGENT}"
 TDAI_USER="${TDAI_USER:-usr-LOCALUSER}"

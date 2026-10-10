@@ -9,3 +9,5 @@ deploy/global-images/tam-health.sh           text eol=lf
 deploy/global-images/tam-l3-reconcile.mjs    text eol=lf
 deploy/global-images/tam-cleanup-residue.mjs text eol=lf
 deploy/global-images/tam-apply-official-config.mjs text eol=lf
+tam-gateway-key.mjs      text eol=lf
+tam-cleanup-residue.mjs  text eol=lf
