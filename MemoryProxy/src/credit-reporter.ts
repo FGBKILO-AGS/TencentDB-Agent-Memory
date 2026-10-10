@@ -315,6 +315,13 @@ export async function tryReportCreditFromPath(
   if (!spaceId || !usage || Object.keys(usage).length === 0) {
     return { attempted: false, ok: false };
   }
+  // 本地/自托管部署没有 credit 上报端点，而 DEFAULT_CONFIG.creditReport.url 是个
+  // 占位域名（gateway.example.com:8000）——不判空就会对**每个请求**做一次注定失败的
+  // fetch 并在日志刷 ERROR（本机实测 26h 内 67 条）。配 creditReport.url: "" 即彻底关闭。
+  // config.ts 的映射用 `??`，显式空串能原路进到这里，不会被默认值顶掉。
+  if (typeof config.url !== "string" || config.url.trim() === "") {
+    return { attempted: false, ok: false };
+  }
   const result = await reportCreditUsage(config, {
     SpaceId: spaceId,
     MemoryLevel: PROXY_MEMORY_LEVEL,
