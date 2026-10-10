@@ -31,7 +31,8 @@
  *
  * # 两个适配点
  *   - `classifyRequest`: 三重信号判(compact / title / main)
- *   - `extractUserText`: content 是 str 直接返回(dsh messages.content 从不用 blocks)
+ *   - `extractUserText`: openai wire 的 content 是裸 str;anthropic wire 是
+ *     `[{type:"text",text}]` block 数组 —— 两种形态都要认(数组走 default 兜底拼接)
  *
  * # 不同于 CB 的地方
  *   - dsh 主对话在 body.messages 里塞 4 条 role=user:真实用户输入 +
@@ -119,18 +120,32 @@ function isDshTitleGen(body: Record<string, unknown>): boolean {
 // ── User text extraction ─────────────────────────────────────────────────────
 
 /**
- * dsh messages.content 是 str,直接返回。
+ * dsh 的 user content 有两种 wire 形态，两种都要认：
+ *   - openai wire(dsh v0.1.x `/chat/completions`)：content 是裸字符串
+ *   - anthropic wire(dsh 桌面版 `/v1/messages`)：content 是 `[{type:"text",text}]` block 数组
  *
- * 抓包实证(fixtures/*.req.json 多条 messages 全 role=user + content:str):
- * dsh 从不用 Anthropic-style content-blocks 数组,连 tool_result 都是独立
- * role=tool 消息(而非嵌在 user 里)。
+ * 早期"抓包实证 dsh 从不用 content-blocks 数组"的结论只在 openai wire 上成立；
+ * 按那条结论只认 string 会让桌面端的 mem: 命令永远解析不出用户输入
+ * （实测差分：同一 payload 仅把 content 换成 block 数组，命令就不被拦截、直接转上游）。
  *
- * 不做 CB 那种 `<user_query>` wrapper 剥离 —— dsh 主对话就是纯用户输入 +
- * 独立 `<system-reminder>` user 消息,没 wrapper 嵌套。
+ * 不做 CB 那种 `<user_query>` wrapper 剥离。但注意：dsh 的 `<system-reminder>`
+ * 不是独立消息，而是追加在**同一条** user 消息、用户文本之后的 text block
+ * （桌面端实测：`mem:help` 后面跟着 `<system-reminder> …`）。
  */
 function extractDshUserText(content: unknown): string | null {
-  if (typeof content !== "string") return null;
-  return content.length > 0 ? content : null;
+  if (typeof content === "string") return content.length > 0 ? content : null;
+  if (!Array.isArray(content)) return null;
+  // 只取第一个非空 text block。不能用 defaultAdapter 的"拼接所有 text block"：
+  // 拼出来的 `mem:help <system-reminder> …` 带尾巴，命令解析器的严格匹配会
+  // 判成未知命令（桌面端实测踩过）。
+  for (const b of content) {
+    if (!b || typeof b !== "object") continue;
+    const block = b as Record<string, unknown>;
+    if (block.type === "text" && typeof block.text === "string" && block.text.length > 0) {
+      return block.text;
+    }
+  }
+  return null;
 }
 
 // ── Adapter export ───────────────────────────────────────────────────────────

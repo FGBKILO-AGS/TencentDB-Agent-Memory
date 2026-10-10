@@ -527,6 +527,25 @@ async function forwardWithRetry(
   return { resp: upstreamResp, retried: false };
 }
 
+/**
+ * 只给 dsh 补 SSE 帧尾的一个字节。
+ *
+ * mem 命令共用的 anthropic SSE builder 用 `lines.join("\n")` 拼响应，末尾只剩一个
+ * `\n`；SSE 规范（以及上游真实透传的响应）要求每个 event 以空行 `\n\n` 收尾。
+ * CC / CB / WB 等客户端的 parser 宽松不报错，dsh 的严格 parser 会在最后一个
+ * event 上判定流提前结束，报 `DeepSeek Messages stream ended before message_stop`。
+ *
+ * 因此不动 shared builder（一根字节不改，其他客户端零影响），只在 dsh 的
+ * `text/event-stream` 响应上补一个 `\n`。非流式走 application/json，不补。
+ */
+async function maybeFixDshStreamTail(agentSource: string, res: Response): Promise<Response> {
+  if (agentSource !== "dsh") return res;
+  if (!res.headers.get("content-type")?.includes("text/event-stream")) return res;
+  const text = await res.text();
+  const tailFixed = text.endsWith("\n\n") ? text : `${text}\n`;
+  return new Response(tailFixed, { status: res.status, headers: res.headers });
+}
+
 /** Main handler for POST /v1/messages (Anthropic Messages API). */
 export async function handleAnthropicMessages(
   c: Context,
@@ -1045,12 +1064,12 @@ export async function handleAnthropicMessages(
     const { buildMemResponse } = await import("./mem-command/response-builder.js");
     const thinkingEnabled = !!(body as Record<string, unknown>).thinking;
     console.log(`[mem-command:session-reset] completed: bypassed=${!!bypassed} agent=${agentName} (${agentIdShort}) team=${teamName ?? "-"} (${teamId || "-"})`);
-    return buildMemResponse(text, {
+    return maybeFixDshStreamTail(agentSource, buildMemResponse(text, {
       protocol: "anthropic",
       stream: isStream,
       requestId: `mem-reset-${Date.now()}`,
       thinking: thinkingEnabled,
-    });
+    }));
   }
 
   // ── mem: command intercept ────────────────────────────────────────────────
@@ -1093,7 +1112,7 @@ export async function handleAnthropicMessages(
           thinking: thinkingEnabled,
         });
         console.log(`[mem-command] cmd=${memCmd.command} args="${truncateArgs(memCmd.args)}" session=${sessionKey} blocked: session not initialized`);
-        return errResponse;
+        return await maybeFixDshStreamTail(agentSource, errResponse);
       }
       // 检测请求是否开启了 extended thinking（Anthropic 协议）
       const thinkingEnabled = !!(body as Record<string, unknown>).thinking;
@@ -1197,7 +1216,7 @@ export async function handleAnthropicMessages(
         traceOutput: memResult.messageText,
       });
 
-      return memResult.response;
+      return await maybeFixDshStreamTail(agentSource, memResult.response);
     }
   }
 
