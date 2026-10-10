@@ -272,6 +272,16 @@ case "$SECRETCODE" in
   *) bad "密钥扫描没跑起来（rc=$SECRETCODE）：$(printf '%s' "$SECOUT" | head -c 140)" ;;
 esac
 
+head2 "11. 面板补丁在场性（hub 容器一重建就会丢的那几个文件）"
+# 面板那 3 个补丁落在 hub 容器**可写层**（不在挂载列表里），所以现有检查一概看不见它们。
+# 判据是"容器里那份 != 镜像里那份"，不是"文件里有没有某个词"——后者会恒绿。
+PPOUT="$(bash "$REPO_DIR/tam-panel-patch-present.sh" 2>&1)"; PP=$?
+case "$PP" in
+  0) ok "$(printf '%s\n' "$PPOUT" | grep -c '\[PASS\]') 项面板补丁断言全过（含参照物链路校验）" ;;
+  1) bad "$(printf '%s\n' "$PPOUT" | grep '\[FAIL\]' | head -2 | tr '\n' ' ')" ;;
+  *) bad "面板补丁检查跑不起来（rc=$PP）：$(printf '%s' "$PPOUT" | head -c 120)" ;;
+esac
+
 printf '\n\033[1m===== 汇总: %d PASS / %d WARN / %d FAIL =====\033[0m\n' "$PASS" "$WARN" "$FAIL"
 if [ "$FAIL" -gt 0 ]; then
   printf '\n排障速查:\n'
