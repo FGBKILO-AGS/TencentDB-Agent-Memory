@@ -119,6 +119,16 @@ export interface FormData {
   retry?: boolean;
   stream?: boolean;
   modelId?: string;
+  /**
+   * wire 协议。默认 "openai"（历史行为）。
+   *
+   * 为什么需要这个字段（本机实测）：DSH 桌面版的 llm-deepseek provider 只能走
+   * Anthropic Messages（代码里直抛 "protocol is not configurable"，且会给 baseURL
+   * 补 /v1 后请 /messages），而本文件的 builder 此前只会输出 OpenAI
+   * `object:"chat.completion"` 形状 —— 客户端根本渲染不出表单，会话永久停在
+   * bypass(agent=-, task=-)，记忆一条不注入。
+   */
+  protocol?: "openai" | "anthropic";
 }
 
 // ── ask_user_question input schema (dsh snake_case + 必填 id) ──────────────────
@@ -242,21 +252,109 @@ function buildAskUserQuestionArgs(data: FormData): { questions: DshAskQuestion[]
 /**
  * Build a dsh `ask_user_question` fake form response.
  *
- * 传输:**OpenAI chat/completions**(stream 或 non-stream)。
- * arguments shape:dsh 原生 `{questions: [{id, question, header, options, multi_select}]}`。
+ * 传输：按 `data.protocol` 分叉 —— "openai"（默认，chat/completions，stream 或
+ * non-stream）或 "anthropic"（Messages）。arguments shape 两边一致：
+ * dsh 原生 `{questions: [{id, question, header, options, multi_select}]}`。
  */
 export function buildFormResponse(data: FormData): Response {
   const model = data.modelId ?? "unknown";
   const created = Math.floor(Date.now() / 1000);
-  const id = "dsh-session-init-" + Date.now();
   const toolCallId = TOOLCALL_PREFIX + Date.now();
   const input = buildAskUserQuestionArgs(data);
   const argsStr = JSON.stringify(input);
 
+  if (data.protocol === "anthropic") {
+    return data.stream
+      ? buildAnthropicStreamingResponse(created, model, toolCallId, argsStr)
+      : buildAnthropicNonStreamingResponse(created, model, toolCallId, argsStr, input);
+  }
+
+  const id = "dsh-session-init-" + Date.now();
   if (data.stream) {
     return buildOpenAIStreamingResponse(id, created, model, toolCallId, argsStr);
   }
   return buildOpenAINonStreamingResponse(id, created, model, toolCallId, argsStr);
+}
+
+// ── Anthropic Messages ────────────────────────────────────────────────────────
+//
+// 形状严格对齐 Anthropic Messages API：assistant 消息的 content 是 block 数组，
+// 工具调用是 `{type:"tool_use", id, name, input}`，终止原因是 `stop_reason`，
+// 流式走 `event: <名>` + `data: <json>` 的 SSE，入参以 input_json_delta 增量下发。
+//
+// 为什么不塑一个 `thinking` block：DSH 开 thinking 时上游会回放历史里的 thinking
+// block，而 fake 表单没有真签名，proxy 下一轮又会
+// "stripped N invalid thinking block(s)" 把它剔掉 —— 与其塑一个会被删的无效 block，
+// 不如不塑。若实测发现 DSH 对缺失 thinking 有硬校验，再在这里补。
+
+function buildAnthropicNonStreamingResponse(
+  created: number,
+  model: string,
+  toolCallId: string,
+  argsStr: string,
+  input: { questions: DshAskQuestion[] },
+): Response {
+  void created;
+  return new Response(JSON.stringify({
+    id: "msg_" + toolCallId,
+    type: "message",
+    role: "assistant",
+    model,
+    content: [{
+      type: "tool_use",
+      id: toolCallId,
+      name: TOOL_NAME,
+      input,
+    }],
+    stop_reason: "tool_use",
+    stop_sequence: null,
+    usage: { input_tokens: 0, output_tokens: 0 },
+  }), { status: 200, headers: { "Content-Type": "application/json" } });
+}
+
+function buildAnthropicStreamingResponse(
+  created: number,
+  model: string,
+  toolCallId: string,
+  argsStr: string,
+): Response {
+  const encoder = new TextEncoder();
+  const msgId = "msg_" + toolCallId;
+  const sse = (event: string, obj: Record<string, unknown>) =>
+    `event: ${event}\ndata: ${JSON.stringify({ type: event, ...obj })}\n\n`;
+
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(encoder.encode(sse("message_start", {
+        message: {
+          id: msgId, type: "message", role: "assistant", model,
+          content: [], stop_reason: null, stop_sequence: null,
+          usage: { input_tokens: 0, output_tokens: 0 },
+        },
+      })));
+      controller.enqueue(encoder.encode(sse("content_block_start", {
+        index: 0,
+        content_block: { type: "tool_use", id: toolCallId, name: TOOL_NAME, input: {} },
+      })));
+      controller.enqueue(encoder.encode(sse("ping", {})));
+      controller.enqueue(encoder.encode(sse("content_block_delta", {
+        index: 0,
+        delta: { type: "input_json_delta", partial_json: argsStr },
+      })));
+      controller.enqueue(encoder.encode(sse("content_block_stop", { index: 0 })));
+      controller.enqueue(encoder.encode(sse("message_delta", {
+        delta: { stop_reason: "tool_use", stop_sequence: null },
+        usage: { output_tokens: 0 },
+      })));
+      controller.enqueue(encoder.encode(sse("message_stop", {})));
+      controller.close();
+    },
+  });
+
+  return new Response(stream, {
+    status: 200,
+    headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "Connection": "keep-alive" },
+  });
 }
 
 // ── OpenAI Non-streaming ───────────────────────────────────────────────────────

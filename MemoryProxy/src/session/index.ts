@@ -215,6 +215,9 @@ export async function handleSessionInit(
       retry: cbFd.retry,
       stream: reqCtx.stream,
       modelId: reqCtx.modelId,
+      // DSH 桌面版只能走 Anthropic Messages（本机实测）；不往下传 protocol 的话
+      // builder 只会塑 OpenAI 形状，客户端渲不出表单 → 会话永久 bypass。
+      protocol: reqCtx.protocol === "anthropic" ? "anthropic" : "openai",
     };
     result.response = buildDshFormResponse(dshFd);
   }
