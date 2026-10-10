@@ -13,6 +13,7 @@
 #   6) L0 回写 / pipeline 是否在工作，并自清理本次探针的 L0
 #   7) 真实桌面会话（只认 session-<uuid>）是否被注入
 #   8) L3 persona 索引与 L2 实际场景是否对得上（有无悬空）
+#   9) aux 端点是否真的可达（agent 前缀表漏人时只有这里会响）
 #
 # 配套: tam-cleanup-residue.mjs  清自检/探针残留（四层）
 #       tam-l3-reconcile.mjs      只修 L3 悬空索引
@@ -73,7 +74,7 @@ if [ ! -f "$PATCH" ]; then
 else
   # ★ 关键：默认 provider 必须是 deepseek-official（内置 llm-deepseek 模块的原生 provider）。
   #   只有原生链路才会携带 x-deepseek-harness-session-id，Proxy 据此建立 conversationId 才会注入记忆。
-  #   若用 llm-pi-ai 下的自定义 provider（如 tdai），走的是通用 OpenAI SDK（x-stainless-* 指纹），
+  #   若走 llm-pi-ai 下的自定义 provider，用的是通用 SDK（x-stainless-* 指纹），
   #   不带 session-id → conversationId=null → injectedSkipped=true → 记忆被整体跳过。
   PROV="$(sed -n '/^- id: agent-default-model$/,/^- id: /p' "$PATCH" | sed -n 's/^[[:space:]]*provider:[[:space:]]*//p' | tr -d '\r' | head -1)"
   if [ "$PROV" = "deepseek-official" ]; then ok "默认 provider = deepseek-official（原生链路，会带 session-id）"
@@ -82,9 +83,18 @@ else
   # llm-deepseek 原生段的 baseURL 必须被劫持到本地 Proxy
   if grep -q 'http://127.0.0.1:8096/dsh/default' "$PATCH"; then ok "llm-deepseek baseURL 已指向本地 Proxy 8096"; else bad "baseURL 未指向 8096" ; fi
 
-  if grep -qE '^\s+reasoningEffort:' "$PATCH"; then
-    bad "检测到 reasoningEffort —— 会触发 UNSUPPORTED_REASONING_EFFORT 并让配置回退到官方直连（AI 失忆的元凶）"
-  else ok "无 reasoningEffort（安全）" ; fi
+  # reasoningEffort 的雷不在"有没有"，在"取值是否被适配器认识"。
+  # 从 app.asar 内 llm-deepseek 适配器自带文档抽出支持的档位是 off|low|high|max
+  # （官方模板写的就是 high）；不在集合内的取值会在**发出网络请求之前**抛
+  # UNSUPPORTED_REASONING_EFFORT，配置静默回退官方直连 → 记忆不注入（历史"AI 失忆"根因）。
+  EFF="$(grep -E '^[[:space:]]+reasoningEffort:' "$PATCH" | sed -n 's/.*reasoningEffort:[[:space:]]*//p' | tr -d '\r"'"'"'' | head -1)"
+  if [ -z "$EFF" ]; then
+    warn "未设 reasoningEffort（能跑，但不吃官方模板的 reasoning 档位）"
+  elif printf '%s' "$EFF" | grep -qE '^(off|low|high|max)$'; then
+    ok "reasoningEffort=$EFF（适配器支持档位）"
+  else
+    bad "reasoningEffort=$EFF 不在支持集合 off|low|high|max —— 请求发出前即 UNSUPPORTED_REASONING_EFFORT，静默回退官方直连"
+  fi
 fi
 
 head2 "5. 记忆注入实测"
@@ -214,6 +224,35 @@ case "$L3OUT" in
   *) bad "L3 对账跑不起来: $(printf '%s' "$L3OUT" | head -c 160)" ;;
 esac
 
+head2 "9. aux 端点路由可达性（防 agent 前缀表再次漏人）"
+# 只为堵一类回归：whitelist.ts 的 AGENT_PREFIX_RE 少列某个 agent 段时，
+# /<agent>/<space>/v1/* 归一化剥不掉前缀，handleAuxiliaryEndpoint 一律本地 404，
+# 而 server.ts 里那些 aux 路由照样"注册成功"—— 启动无报错、主对话也正常，
+# 只有真去打 count_tokens 才暴露（dsh 三条已注册 aux 端点就这么静默死了）。
+# 正控制必须 200、负控制必须 404：只数正控制的话，把正则放宽成剥一切前缀也会全绿。
+CT_DIR="$(mktemp -d 2>/dev/null || echo .)"
+printf '%s' '{"model":"deepseek-flash","messages":[{"role":"user","content":"tam health aux probe"}]}' > "$CT_DIR/ct.json"
+_aux_code() {
+  curl -s -o "$CT_DIR/ct.out" -w '%{http_code}' -m 30 -X POST "http://127.0.0.1:8096/$1/default/v1/messages/count_tokens" \
+    -H "Authorization: Bearer $UK" -H 'anthropic-version: 2023-06-01' -H 'content-type: application/json' \
+    --data-binary "@$CT_DIR/ct.json" 2>/dev/null
+}
+for AG in claude-code codebuddy dsh; do
+  C="$(_aux_code "$AG")"
+  if [ "$C" = "200" ] && grep -q 'input_tokens' "$CT_DIR/ct.out"; then
+    ok "$AG 的 aux 端点可达 (count_tokens HTTP 200)"
+  else
+    bad "$AG 的 aux 端点 HTTP=$C body=$(head -c 90 "$CT_DIR/ct.out") —— 多半是 AGENT_PREFIX_RE 少了 $AG"
+  fi
+done
+C_NEG="$(_aux_code workbuddy)"
+if [ "$C_NEG" = "404" ]; then
+  ok "workbuddy 维持 404（它没注册该端点，前缀表不该为它放宽）"
+else
+  bad "workbuddy count_tokens HTTP=$C_NEG，期望 404 —— 前缀表放宽过头，剥了不该剥的段"
+fi
+if [ "$CT_DIR" = "." ]; then rm -f ct.json ct.out; else rm -rf "$CT_DIR"; fi
+
 printf '\n\033[1m===== 汇总: %d PASS / %d WARN / %d FAIL =====\033[0m\n' "$PASS" "$WARN" "$FAIL"
 if [ "$FAIL" -gt 0 ]; then
   printf '\n排障速查:\n'
@@ -221,8 +260,10 @@ if [ "$FAIL" -gt 0 ]; then
   printf '  · 注入失效     -> docker logs --tail 50 tdai-proxy | grep injection-debug\n'
   printf '  · upstream 错  -> 必须为 https://api.deepseek.com/anthropic（.env 与 .proxy-config/config.yaml 两处同步）\n'
   printf '                   实测: /anthropic 只接 /messages；/v1 只接 /chat/completions；两者不通用\n'
-  printf '  · DSH 报 404   -> llm-deepseek 的 baseURL 末尾必须带 /v1（白名单只认 /v1/messages，\n'
-  printf '                   裸 /messages 会被 handler.ts 硬回退成 /chat/completions）\n'
+  printf '  · DSH 报 404   -> 分两种：主 /v1/messages 通而 aux 不通 => whitelist.ts 的 AGENT_PREFIX_RE\n'
+  printf '                   少了 dsh（第 9 节专抓这条）；主路径就 404 => 客户端 baseURL 写法。\n'
+  printf '                   官方 llm-deepseek 适配器自己追加 /v1/messages，baseURL 末尾**不带** /v1；\n'
+  printf '                   带了也通（末尾严格等于 /v1 的路径段会直接复用，不会拼成 /v1/v1）。\n'
   exit 1
 fi
 exit 0

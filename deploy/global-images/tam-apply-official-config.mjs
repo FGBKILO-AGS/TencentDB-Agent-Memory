@@ -25,14 +25,24 @@ const DROP_BYPASS = process.argv.includes("--drop-bypass");
 const die = (m) => { console.error("!! " + m); process.exit(2); };
 
 // ── 1. 版本硬闸 ──
-if (!existsSync(RUNTIME)) die(`找不到 ${RUNTIME}（版本判据只认 runtime.json 的 desktopVersion）`);
-const dv = JSON.parse(readFileSync(RUNTIME, "utf8")).desktopVersion;
-const [maj, min] = String(dv).split(".").map(Number);
+// ⚠ 判据不能读 ~/.dsh/dsh-runtimes/dsh-primary-runtime/runtime.json：
+//   那是首次运行时铺下的 provisioning 记录，壳升级后**不会**刷新它（实测壳已 0.2.0-rc.2，
+//   该文件仍写 0.1.7-rc.2，而两者 payloadDigest 相同 ⇒ 它记的是依赖沙箱，不是 dsh 代码）。
+// 权威版本看两处：安装目录里壳自带的 runtime.json，以及主 exe 的 FileVersion。
+const BUNDLED = "D:/DeepSeek-Harness/download/resources/runtime/primary-runtime/runtime.json";
+let ver = null, src0 = null;
+for (const [p, key] of [[BUNDLED, "壳自带 runtime.json"], [RUNTIME, "~/.dsh 缓存 runtime.json(仅参考)"]]) {
+  if (!existsSync(p)) continue;
+  const v = JSON.parse(readFileSync(p, "utf8")).desktopVersion;
+  if (!ver && p === BUNDLED) { ver = v; src0 = key; }
+  console.log(`  ${key}: ${v}`);
+}
+if (!ver) die(`读不到壳自带 runtime.json（${BUNDLED}）—— 请改 EXE 路径常量`);
+const [maj, min] = String(ver).split(".").map(Number);
 const ok = maj > 0 || (maj === 0 && min >= 2);
-console.log(`桌面 desktopVersion = ${dv} → 官方 §1.5 要求 ≥ 0.2.0-rc.1 : ${ok ? "满足" : "不满足"}`);
+console.log(`\n权威 desktopVersion = ${ver}（来源：${src0}）→ 官方 §1.5 要求 ≥ 0.2.0-rc.1 : ${ok ? "满足" : "不满足"}`);
 if (!ok) {
-  console.log("   拒绝改配置。先装 D:\\DeepSeek-Harness\\download\\DeepSeek Harness.exe（FileVersion 已是 0.2.0-rc.2），");
-  console.log("   装完重跑本脚本。当前 baseURL 带 /v1 是 0.1.7 的正确写法，不要手改。");
+  console.log("   拒绝改配置。当前 baseURL 带 /v1 是 <0.2 的正确写法，不要手改。");
   process.exit(0);
 }
 
