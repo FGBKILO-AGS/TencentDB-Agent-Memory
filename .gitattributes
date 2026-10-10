@@ -1,0 +1,10 @@
+# 本机 core.autocrlf=true，checkout 会把 LF 转成 CRLF。
+# bash / node 脚本被转成 CRLF 后，行尾 \r 会渗进命令替换与配置插值里（Git Bash 的
+# bash 多数时候容忍，但生成 YAML 的那类拼接会静默带 \r）。
+# 这里只钉本仓库自检/部署脚本，不动既有文件，避免把整个工作区换行搅一遍。
+tam-health.sh            text eol=lf
+tam-l3-reconcile.mjs     text eol=lf
+tam-cleanup-residue.mjs  text eol=lf
+deploy/global-images/tam-health.sh           text eol=lf
+deploy/global-images/tam-l3-reconcile.mjs    text eol=lf
+deploy/global-images/tam-cleanup-residue.mjs text eol=lf
