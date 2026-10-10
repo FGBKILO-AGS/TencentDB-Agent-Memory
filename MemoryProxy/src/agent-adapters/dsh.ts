@@ -65,6 +65,32 @@ const DSH_TITLE_SYSTEM_PROMPT_PREFIX =
 const DSH_TITLE_MAX_TOKENS_CEIL = 128;
 
 /**
+ * 取 system 文本，兼容两种 wire 形状。
+ *
+ * - OpenAI Chat Completions：system 是 `messages[0]`（role="system"，content: str）
+ *   —— 抓包实证只覆盖了这一种形状。
+ * - Anthropic Messages：system 在 **顶层 `body.system`**（string 或 content-block 数组），
+ *   `messages` 里恒没有 system 角色。DSH 桌面版的 llm-deepseek provider 只能走这一条
+ *   （实测抛 "protocol is not configurable"），所以只查 messages[0] 时 title-gen 永不命中。
+ */
+function readSystemText(body: Record<string, unknown>): string | null {
+  const sys = body.system;
+  if (typeof sys === "string" && sys.length > 0) return sys;
+  if (Array.isArray(sys)) {
+    const parts = sys
+      .map((s) => (s as { text?: unknown })?.text)
+      .filter((t): t is string => typeof t === "string" && t.length > 0);
+    if (parts.length > 0) return parts.join("\n");
+  }
+  const messages = body.messages;
+  if (Array.isArray(messages) && messages.length > 0) {
+    const first = messages[0] as { role?: string; content?: unknown } | undefined;
+    if (first && first.role === "system" && typeof first.content === "string") return first.content;
+  }
+  return null;
+}
+
+/**
  * 判定 dsh 请求是否为 title-gen(body 特征三合一)。
  *
  * 全部条件必须满足才当 aux。任一条不满足即返 false(避免误判 main)。
@@ -83,12 +109,9 @@ function isDshTitleGen(body: Record<string, unknown>): boolean {
   const maxTokens = body.max_tokens;
   if (typeof maxTokens !== "number" || maxTokens > DSH_TITLE_MAX_TOKENS_CEIL) return false;
 
-  // 条件 4: 首条 system 消息 content 以 title prompt 前缀开头
-  const messages = body.messages;
-  if (!Array.isArray(messages) || messages.length === 0) return false;
-  const first = messages[0] as { role?: string; content?: unknown } | undefined;
-  if (!first || first.role !== "system" || typeof first.content !== "string") return false;
-  if (!first.content.startsWith(DSH_TITLE_SYSTEM_PROMPT_PREFIX)) return false;
+  // 条件 4: system 文本以 title prompt 前缀开头（OpenAI 与 Anthropic 两种形状都支持）
+  const sysText = readSystemText(body);
+  if (sysText === null || !sysText.startsWith(DSH_TITLE_SYSTEM_PROMPT_PREFIX)) return false;
 
   return true;
 }

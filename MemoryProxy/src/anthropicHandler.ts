@@ -55,6 +55,7 @@ import { triggerSkillExtractIfReady } from "./skill/handler-glue.js";
 import { emitModelIntentTelemetry } from "./session/model-intent-telemetry.js";
 import { isExtractionAllowed, logExtractionSkipped } from "./extraction-gate.js";
 import type { CcRequestKind } from "./common/cc-request-classifier.js";
+import type { RequestKind } from "./agent-adapters/types.js";
 import { buildRequestDebugMetadata } from "./common/langfuse-debug.js";
 import { resolveAgentAdapter } from "./agent-adapters/index.js";
 import {
@@ -570,7 +571,11 @@ export async function handleAnthropicMessages(
     ? _pathPartsEarly[0] : undefined;
   const agentAdapter = resolveAgentAdapter(_agentFromPathEarly ?? "claude-code");
   const ccRoutingEnabled = config.ccRequestRouting?.enabled === true;
-  const requestKind: CcRequestKind = ccRoutingEnabled ? agentAdapter.classifyRequest(body) : "main";
+  // 实际分类推延到 lcHeaders 就绪之后（见下方 “Request classification” 段）。
+  // 本行不能就地算：dsh 的 compaction 判据只看 `x-deepseek-harness-compact` 请求头，
+  // 而 headers 要到 664 行才归一化成 lcHeaders；在这行传不进去，本机实测
+  // 26h 日志里 aux/compact 命中 0 条（全部当成 main 走完整注入链并写 L0）。
+  let requestKind: CcRequestKind = "main";
 
   // ── Model gate: reject requests whose `model` is not a registered display name ──
   // 价目表已配置时，客户端 `model` 必须匹配某条 entry 的 `modelName`（展示名，
@@ -670,6 +675,21 @@ export async function handleAnthropicMessages(
   const { resolveConversationId } = await import("./session/session-key.js");
   const conversationId = resolveConversationId(c);
   const sessionKey = conversationId ?? resolveSessionKey(config, lcHeaders, c.req.path, body, keyId);
+
+  // ── Request classification (需要小写化后的 headers) ────────────────────
+  // adapter 的 RequestKind 比 CcRequestKind 多一个 "auxiliary"（dsh / opencode 等
+  // 客户端的后台辅辅助请求）。下游的门控只判 "sidequery"，所以必须显式映射：
+  // 否则 auxiliary 会落到 main 分支，照旧弹 session-init / 跑注入 / 写 L0。
+  const rawKind: RequestKind = ccRoutingEnabled
+    ? agentAdapter.classifyRequest(body, c.req.path, lcHeaders)
+    : "main";
+  requestKind = rawKind === "auxiliary" ? "sidequery" : rawKind;
+  if (rawKind !== "main") {
+    console.log(
+      `[request-classify] session=${sessionKey} agent=${agentSource} raw=${rawKind} → ${requestKind}` +
+        (rawKind === "auxiliary" ? " (skip session-init / injection / mem / L0 / skill)" : ""),
+    );
+  }
 
   // ── Auth verification (user_key → user_id) ──────────────────────────────────────
   // Reuse the early verify result — it ran before body parse to decide the
@@ -979,7 +999,7 @@ export async function handleAnthropicMessages(
       if (initResult.resetFlow && initResult.justRegistered && !initResult.bypassed) {
         _resetFlowResult = {
           agentName: initResult.agentDetail?.name ?? "未知",
-          // agentIdShort 字段名沿用历史，但此处**存完整 agent_id**（如 agt-1celthr7yn）。
+          // agentIdShort 字段名沿用历史，但此处**存完整 agent_id**（如 agt-LOCALAGENT4）。
           // 之前 slice(-8) 会截断成 "elthr7yn" 用户看不懂，与 team 截断问题对称。
           agentIdShort: (initResult.sessionInfo as Record<string, unknown>)?.agent_id
             ? String((initResult.sessionInfo as Record<string, unknown>).agent_id) : "",
@@ -1800,9 +1820,19 @@ export async function handleAnthropicMessages(
   // 短期记忆。**此前仅 stream=true 会写**，non-stream 请求（如工具/测试脚本
   // 常用的 stream:false）沉默丢失。缺失该调用意味着 CC non-stream 场景
   // 完全没有 L0 记忆写入。
-  if (isMainDialog && tdaiClient && isExtractionAllowed(config, "tdai-memory")) {
+  //
+  // 去重门（本机实测）：一个工具循环的每一轮请求都带同一条 last-user 消息，
+  // 不门控的话 4 步循环T0 里同一句用户原话会被写 4 份（实测 total=8，其中 4 份重复）。
+  // 只在“本轮回答不再调工具”的那一步落盘：中间步的关键结论已包在最终回答里，
+  // 且 skill buffer 那条路径仍按 tool_use 计数（上面 1780 行那段）不受影响。
+  const stepHasToolUse = Array.isArray((assistantMessage as { content?: unknown } | null)?.content)
+    && ((assistantMessage as { content: Record<string, unknown>[] }).content)
+      .some((b) => b?.type === "tool_use");
+  if (isMainDialog && tdaiClient && isExtractionAllowed(config, "tdai-memory") && !stepHasToolUse) {
     recordTdaiTurn(tdaiClient, tdaiIdentity, tdaiUserMessage, outputContent)
       .catch((err: unknown) => pipe.error("TDAI_L0", err));
+  } else if (isMainDialog && tdaiClient && stepHasToolUse) {
+    console.log(`[tdai-l0] skip write for tool_use step session=${sessionKey}`);
   } else if (isMainDialog && tdaiClient) {
     logExtractionSkipped(config, "tdai-memory", sessionKey);
   } else if (!isMainDialog) {
@@ -2130,7 +2160,10 @@ function consumeAnthropicStream(stream: ReadableStream<Uint8Array>, ctx: Anthrop
       const isMainDialog = ctx.requestKind === "main";
 
       // Tdai L0 write
-      if (isMainDialog && ctx.tdaiClient && isExtractionAllowed(ctx.config, "tdai-memory")) {
+      //
+      // 与非流式分支对称的去重门：toolUseCount>0 说明本轮只是工具循环的一个中间步，
+      // 写下去就是重复的 last-user 噪声（本机实测一个 4 步循环写 4 份）。
+      if (isMainDialog && ctx.tdaiClient && isExtractionAllowed(ctx.config, "tdai-memory") && toolUseCount === 0) {
         // Streaming 不 await（会拖慢 SSE 关流），trackWrite + withL0Retry 应对两条丢包线：
         //   - trackWrite 注册 in-flight promise 到全局 set；SIGTERM 时 index.ts 会
         //     flushPendingWrites 兜底，避免 pod rolling 时 event loop 未 flush 就退出丢 L0。
@@ -2141,6 +2174,8 @@ function consumeAnthropicStream(stream: ReadableStream<Uint8Array>, ctx: Anthrop
             outputText || null,
           )).catch((err: unknown) => pipe.error("TDAI_L0", err))
         );
+      } else if (isMainDialog && ctx.tdaiClient && toolUseCount > 0) {
+        console.log(`[tdai-l0] skip write (stream) for tool_use step session=${ctx.sessionKeyForSkill} toolUseCount=${toolUseCount}`);
       } else if (isMainDialog && ctx.tdaiClient) {
         logExtractionSkipped(ctx.config, "tdai-memory", ctx.sessionKeyForSkill);
       } else if (!isMainDialog) {
