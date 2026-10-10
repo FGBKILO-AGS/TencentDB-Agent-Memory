@@ -67,6 +67,15 @@ export function getLastUserMessageText(messages: RawMessage[]): string {
     const role = messages[i].role;
     if (role !== "user" && role !== "tool") continue;
 
+    // Anthropic wire（dsh v0.2 / 桌面版）把答复塞在 role:"user" 的
+    // content[].type:"tool_result" block 里，而不是 openai 的 role:"tool"。
+    // 必须排在 `if (!text) continue` 之前：这种消息里没有 text block，
+    // getMessageText 只会返回空串，放后面等于没写。
+    if (role === "user") {
+      const toolResultText = getAnthropicToolResultText(messages[i]);
+      if (toolResultText) return toolResultText;
+    }
+
     const text = getMessageText(messages[i]);
     if (!text) continue;
 
@@ -91,6 +100,34 @@ export function getLastUserMessageText(messages: RawMessage[]): string {
     }
   }
   return best;
+}
+
+/**
+ * 从 anthropic 形态的 user 消息里取 session-init 答复。
+ *
+ * dsh v0.2 / 桌面版走 Anthropic Messages，答复塞在
+ * `role:"user"` + `content[] = { type:"tool_result", tool_use_id, content }`，
+ * 与 openai wire 的 `role:"tool" + tool_call_id` 是两种载体。
+ * 只取 `tool_use_id` 命中 session-init 前缀的 block，避免把普通工具结果当答复。
+ */
+function getAnthropicToolResultText(msg: RawMessage): string {
+  const content = msg.content;
+  if (!Array.isArray(content)) return "";
+  for (const raw of content as Array<Record<string, unknown>>) {
+    if (!raw || raw.type !== "tool_result") continue;
+    const toolUseId = raw.tool_use_id;
+    if (typeof toolUseId !== "string" || !/call_(wb_|dsh_|oc_)?session_init_/.test(toolUseId)) continue;
+    const inner = raw.content;
+    if (typeof inner === "string" && inner.length > 0) return inner;
+    if (Array.isArray(inner)) {
+      const parts: string[] = [];
+      for (const b of inner as AnthropicBlock[]) {
+        if (b && b.type === "text" && typeof b.text === "string") parts.push(b.text);
+      }
+      if (parts.length > 0) return parts.join("\n");
+    }
+  }
+  return "";
 }
 
 function getMessageText(msg: RawMessage): string {
