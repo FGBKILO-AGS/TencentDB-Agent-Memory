@@ -14,6 +14,7 @@
 #   7) 真实桌面会话（只认 session-<uuid>）是否被注入
 #   8) L3 persona 索引与 L2 实际场景是否对得上（有无悬空）
 #   9) aux 端点是否真的可达（agent 前缀表漏人时只有这里会响）
+#  10) 被跟踪文件里有没有明文密钥
 #
 # 配套: tam-cleanup-residue.mjs  清自检/探针残留（四层）
 #       tam-l3-reconcile.mjs      只修 L3 悬空索引
@@ -259,6 +260,17 @@ else
   bad "workbuddy count_tokens HTTP=$C_NEG，期望 404 —— 前缀表放宽过头，剥了不该剥的段"
 fi
 if [ "$CT_DIR" = "." ]; then rm -f ct.json ct.out; else rm -rf "$CT_DIR"; fi
+
+head2 "10. 被跟踪文件里没有明文密钥"
+# 与第 9 节同因：这类问题不会让任何接口报错，只在"下次有人把仓库推出去"时爆。
+# 闸本体自带红绿自证（tam-no-secret-tracked.sh --selftest），这里只做日常复跑。
+SECOUT="$(bash "$REPO_DIR/tam-no-secret-tracked.sh" 2>&1)"
+SECRETCODE=$?
+case "$SECRETCODE" in
+  0) ok "$(printf '%s\n' "$SECOUT" | grep -o '没有明文密钥.*' | head -1)" ;;
+  1) bad "$(printf '%s\n' "$SECOUT" | grep '\[FAIL\]' | head -3 | tr '\n' ' ')" ;;
+  *) bad "密钥扫描没跑起来（rc=$SECRETCODE）：$(printf '%s' "$SECOUT" | head -c 140)" ;;
+esac
 
 printf '\n\033[1m===== 汇总: %d PASS / %d WARN / %d FAIL =====\033[0m\n' "$PASS" "$WARN" "$FAIL"
 if [ "$FAIL" -gt 0 ]; then
