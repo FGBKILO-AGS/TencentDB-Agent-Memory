@@ -26,11 +26,18 @@ export function useChatMemory(props: { activeTeamId?: string | null } = {}) {
   const auth = readAuth();
   const { activeTeamId: storeActiveTeamId, activeTeam } = useTeams();
   const currentUserId = auth?.user_id ?? '';
+  // system_admin 可管理全团队资产：下拉用本 team 全部 agent。
+  // 服务端已对管理员放行 owner 过滤，唯独这里还硬筛，会让管理员切到他人团队时
+  // 下拉为空、记忆块列表随之显示 0。普通成员仍只看自己 owner 的 agent。
+  const isAdminViewer = auth?.isAdmin === true;
   const activeTeamId = props.activeTeamId ?? storeActiveTeamId;
   const { agents: teamAgents } = useAgents(activeTeamId);
   const ownedTeamAgents = useMemo(
-    () => teamAgents.filter((a) => a.owner_user_id === currentUserId),
-    [teamAgents, currentUserId],
+    () =>
+      isAdminViewer
+        ? teamAgents
+        : teamAgents.filter((a) => a.owner_user_id === currentUserId),
+    [teamAgents, currentUserId, isAdminViewer],
   );
 
   const [blocks, setBlocks] = useState<MemoryBlock[]>([]);
@@ -608,6 +615,7 @@ export function useChatMemory(props: { activeTeamId?: string | null } = {}) {
     activeTeam,
     activeTeamId,
     currentUserId,
+    isAdminViewer,
     ownedTeamAgents,
     teamAgents,
     scopeTabLabels,

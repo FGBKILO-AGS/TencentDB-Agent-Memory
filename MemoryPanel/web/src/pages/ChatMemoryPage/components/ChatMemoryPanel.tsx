@@ -37,6 +37,7 @@ export default function ChatMemoryPanel(
     activeTeam,
     activeTeamId,
     currentUserId,
+    isAdminViewer,
     ownedTeamAgents,
     scopeTabLabels,
     // state
@@ -166,14 +167,16 @@ export default function ChatMemoryPanel(
               isItemDisabled={(b) =>
                 scopeTab === 'fixed' &&
                 b.scope === 'private' &&
-                b.uploaded_by_user_id !== currentUserId
+                b.uploaded_by_user_id !== currentUserId &&
+                !isAdminViewer
               }
               emptyText={t('memory.empty.filtered')}
               renderItem={(b) => {
                 const isRevoked =
                   scopeTab === 'fixed' &&
                   b.scope === 'private' &&
-                  b.uploaded_by_user_id !== currentUserId;
+                  b.uploaded_by_user_id !== currentUserId &&
+                  !isAdminViewer;
                 const isOwner = b.uploaded_by_user_id === currentUserId;
                 const canToggleScope = scopeTab === 'fixed' && isOwner && !!b.scope;
                 const canUnbind = scopeTab === 'fixed' && !isSelfChatMemory(b);

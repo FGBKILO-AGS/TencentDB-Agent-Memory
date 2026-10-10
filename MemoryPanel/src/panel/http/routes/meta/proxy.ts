@@ -176,6 +176,19 @@ export function registerMetaProxyRoutes(api: Hono, deps: PanelDeps): void {
       reqId: c.get('reqId'),
     };
 
+    // system_admin 跨 owner 查看：前端把 owner_user_id 按"当前用户"下发，
+    // 管理员切到他人团队时 agent/list 会被筛成空 → 这里对管理员忽略该过滤。
+    // 与 /chat-memory/mine、my-agents、agent-fixed 的管理员口径保持一致。
+    if (
+      action === 'agent/list' &&
+      body &&
+      typeof body === 'object' &&
+      (body as Record<string, unknown>).owner_user_id &&
+      (await isCallerSystemAdmin(deps, ctx))
+    ) {
+      delete (body as Record<string, unknown>).owner_user_id;
+    }
+
     // create 类 action：先查重
     const duplicateMsg = await checkDuplicate(action, body, ctx, deps);
     if (duplicateMsg) {

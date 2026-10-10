@@ -42,7 +42,7 @@ import {
 import type { MetaEnvelope } from "../../kernel/envelope.js";
 import { MAX_IMPORTED_AGENTS } from "../../domain/chat-memory-governance.js";
 import { newExternalAssetId } from "../../domain/asset-id.js";
-import { fetchAllMetaListItems } from "./knowledge/common.js";
+import { fetchAllMetaListItems, isCallerSystemAdmin } from "./knowledge/common.js";
 
 /**
  * 归一化详情页时间筛选器传来的 time_start / time_end。
@@ -202,7 +202,9 @@ export function registerChatMemoryRoutes(api: Hono, deps: PanelDeps): void {
       }
       if (agentEnv.code !== 0) return respondEnvelope(c, agentEnv);
       const agent = agentEnv.data as AgentRaw;
-      if (agent.owner_user_id !== meUserId) {
+      // 读路径放行 system_admin：否则管理员切到他人团队时这里 403，
+      // Agent 下拉与记忆块列表都会空掉。写路径（unbind/allocate/clear）不放开。
+      if (agent.owner_user_id !== meUserId && !(await isCallerSystemAdmin(deps, ctx))) {
         return respondControlError(c, 403, "NOT_YOUR_AGENT");
       }
 
@@ -316,18 +318,23 @@ export function registerChatMemoryRoutes(api: Hono, deps: PanelDeps): void {
       // 拉 team 下所有 agent，然后面板层按 owner=me 过滤
       // （tdai /v3/meta/agent/list 传 team_id 时会忽略 owner_user_id，需自己过滤）
       // 分页拉全量：单页 20 条截断会让团队 agent > 20 时"我的 Agent"列表显示不全
+      // system_admin 例外：看本 team 全部 agent（否则管理员切到他人团队时下拉为空、
+      // 记忆块列表被"选中 agent"过滤成 0，与 /chat-memory/mine 的管理员口径配套）
       let agentListError: MetaEnvelope<unknown> | null = null;
-      const agents = (
-        await fetchAllMetaListItems<AgentRaw & { name: string; description?: string }>(
-          deps,
-          ctx,
-          "agent/list",
-          { team_id: teamId, status: "active" },
-          (env) => {
-            agentListError = env;
-          },
-        )
-      ).filter((a) => a.owner_user_id === meUserId);
+      const agentsAll = await fetchAllMetaListItems<
+        AgentRaw & { name: string; description?: string }
+      >(
+        deps,
+        ctx,
+        "agent/list",
+        { team_id: teamId, status: "active" },
+        (env) => {
+          agentListError = env;
+        },
+      );
+      const agents = (await isCallerSystemAdmin(deps, ctx))
+        ? agentsAll
+        : agentsAll.filter((a) => a.owner_user_id === meUserId);
       if (agentListError) return respondEnvelope(c, agentListError);
 
       // 每个 agent 对应一块记忆：查 chat_memory asset（若已 auto-mint）拿到 visibility
@@ -380,6 +387,10 @@ export function registerChatMemoryRoutes(api: Hono, deps: PanelDeps): void {
     const meUserId = await resolveCallerUserId(deps, ctx);
     if (!meUserId) return respondControlError(c, 401, "INVALID_USER_KEY");
 
+    // system_admin 看本 team 全量；普通成员仍只看自己 owner 的资产。
+    // 与 meta/proxy.ts 的管理员放行口径保持一致（同一 isCallerSystemAdmin）。
+    const isAdmin = await isCallerSystemAdmin(deps, ctx);
+
     // 分页拉全量：单页 20 条截断会让"我的资产"超过 20 条时列表显示不全
     let listError: MetaEnvelope<unknown> | null = null;
     const items = (
@@ -387,7 +398,11 @@ export function registerChatMemoryRoutes(api: Hono, deps: PanelDeps): void {
         deps,
         ctx,
         "asset/list",
-        { team_id: teamId, asset_type: "chat_memory", owner_user_id: meUserId },
+        {
+          team_id: teamId,
+          asset_type: "chat_memory",
+          ...(isAdmin ? {} : { owner_user_id: meUserId }),
+        },
         (env) => {
           listError = env;
         },
@@ -2034,6 +2049,9 @@ async function authorizeChatMemoryRead(
   blockId: string,
 ): Promise<boolean> {
   if (asset.owner_user_id === meUserId) return true;
+  // system_admin 可读任意 chat_memory 块（与 /chat-memory/mine 的管理员全量列表配套，
+  // 否则管理员能在列表里看到别人的 private 块、点进去却 403）。
+  if (await isCallerSystemAdmin(deps, ctx)) return true;
   if (asset.visibility === "team") {
     if (await isTeamMember(deps, ctx, asset.team_id, meUserId)) return true;
   }

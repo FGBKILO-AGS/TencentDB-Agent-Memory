@@ -67,6 +67,19 @@ export function buildPanelApp(deps: PanelDeps): Hono {
   });
 
   const distDir = deps.config.ui.distDir;
+  // html 与 /assets/ 一律 no-store：产物虽是内容哈希名，但懒加载 chunk 用
+  // `from "./main-<hash>.js"` **按名静态引用**入口，所以入口文件名不能改（改了就会出现
+  // 两份入口模块图 = 两份 React）。要就地替换 bundle 又立刻生效，只能给资源也关掉缓存。
+  // 必须在 next() 之后改 c.res —— c.header() 会被 serveStatic 自建的 Response 覆盖。
+  app.use('/*', async (c, next) => {
+    await next();
+    try {
+      const ct = c.res?.headers?.get('content-type') ?? '';
+      if (ct.includes('text/html') || c.req.path.startsWith('/assets/')) c.res.headers.set('cache-control', 'no-store');
+    } catch {
+      /* 响应头不可写时不影响正文 */
+    }
+  });
   app.use('/*', serveStatic({ root: distDir }));
   app.get('*', (c, next) => {
     const p = c.req.path;
