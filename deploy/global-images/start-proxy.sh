@@ -12,6 +12,12 @@
 #   PROXY_UPSTREAM_URL / PROXY_UPSTREAM_API_KEY / PROXY_UPSTREAM_MODEL
 
 set -euo pipefail
+# MSYS/Git Bash 会把 `-v <host>:<dest>:ro` 里的冒号当路径分隔符，把 /data/config.yaml
+# 改写成 D:\...\data\config.yaml，结果容器挂不到配置、静默回退内置默认值。
+# 本机实测踩过（容器起来但 /health 里 upstream 是占位域名）。
+case "$(uname -s 2>/dev/null || echo unknown)" in
+  MINGW*|MSYS*|CYGWIN*) export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' ;;
+esac
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=./_lib.sh
 source "$SCRIPT_DIR/_lib.sh"
@@ -73,6 +79,51 @@ fi
 
 bool() { [[ "$1" == "1" ]] && echo "true" || echo "false"; }
 
+# ── 本地适配可选面（.env 驱动；未设置时渲染成与旧版本等价的 YAML）──
+# PROXY_EXTERNAL_GATEWAY_URL          : 注入块里 curl 配方的基址（不配则容器回退成自己网卡 IP）
+# PROXY_SESSION_INIT_SKIP_ASSET_CONFIRM: 跳过 asset_confirm 首轮表单
+# PROXY_FORCE_TEAM_ID / PROXY_FORCE_AGENT_ID: sessionInit 强制身份（本地单 agent 绕开表单）
+# PROXY_STORAGE_ENABLED               : 开启 sqlite 存储，使会话绑定活过容器重启
+# PROXY_DATA_VOLUME                   : proxy 数据卷名（空 = 不开卷，行为与旧版一致）
+# PROXY_BIND_HOST                     : 宿主端口绑定地址（默认 0.0.0.0 保持旧行为）
+SESSION_INIT_EXTRA=""
+if [[ "${PROXY_SESSION_INIT_SKIP_ASSET_CONFIRM:-0}" == "1" ]]; then
+  SESSION_INIT_EXTRA+=$'\n  skipAssetConfirm: true'
+fi
+if [[ -n "${PROXY_FORCE_TEAM_ID:-}" && -n "${PROXY_FORCE_AGENT_ID:-}" ]]; then
+  SESSION_INIT_EXTRA+=$'\n  debugForceIdentity:'
+  SESSION_INIT_EXTRA+=$'\n'"    team_id: \"$PROXY_FORCE_TEAM_ID\""
+  SESSION_INIT_EXTRA+=$'\n'"    agent_id: \"$PROXY_FORCE_AGENT_ID\""
+fi
+INJECTION_EXTRA=""
+if [[ -n "${PROXY_EXTERNAL_GATEWAY_URL:-}" ]]; then
+  INJECTION_EXTRA=$'\n  externalGatewayUrl: "'"${PROXY_EXTERNAL_GATEWAY_URL}"'"'
+fi
+STORAGE_YAML=""
+if [[ "${PROXY_STORAGE_ENABLED:-0}" == "1" ]]; then
+  STORAGE_YAML=$'\nstorage:\n  enabled: true\n  backend: sqlite'
+fi
+# PROXY_CREDIT_REPORT_DISABLED=1 → 空 url + 不超时，配合 credit-reporter 里的
+# 空串守卫彻底关掉上报（默认值是个占位域名，不关则每请求刷一条 ERROR）。
+CREDIT_YAML=""
+if [[ "${PROXY_CREDIT_REPORT_DISABLED:-0}" == "1" ]]; then
+  CREDIT_YAML=$'\ncreditReport:\n  url: ""\n  timeoutMs: 0'
+fi
+RUN_VOLUME_ARGS=()
+if [[ -n "${PROXY_DATA_VOLUME:-}" ]]; then
+  RUN_VOLUME_ARGS+=( -v "${PROXY_DATA_VOLUME}:/data/tdai-memory-proxy" )
+fi
+# 开发验证用：可把本地改过的 proxy 源码文件挂进镜像（镜像用 tsx 直跑 TS，无需 rebuild）。
+# 空格分隔的 "host路径:容器路径" 列表；未设则行为与旧版一致。
+SRC_MOUNT_ARGS=()
+if [[ -n "${PROXY_SRC_MOUNTS:-}" ]]; then
+  for _spec in ${PROXY_SRC_MOUNTS}; do
+    SRC_MOUNT_ARGS+=( -v "$_spec" )
+  done
+  info "源码覆盖挂载: ${PROXY_SRC_MOUNTS}"
+fi
+info "可选面: gateway_url=${PROXY_EXTERNAL_GATEWAY_URL:-<未设>} skip_asset_confirm=${PROXY_SESSION_INIT_SKIP_ASSET_CONFIRM:-0} force=${PROXY_FORCE_TEAM_ID:-<未设>}/${PROXY_FORCE_AGENT_ID:-<未设>} storage=${PROXY_STORAGE_ENABLED:-0} volume=${PROXY_DATA_VOLUME:-<none>} bind=${PROXY_BIND_HOST:-0.0.0.0}"
+
 info "生成 proxy config → $CONFIG_FILE  (auth=$(bool $PROXY_ENABLE_AUTH) session-init=$(bool $PROXY_ENABLE_SESSION_INIT) tdai=$(bool $PROXY_ENABLE_TDAI))"
 cat > "$CONFIG_FILE" <<YAML
 # 由 start-proxy.sh 自动生成 —— 每次启动覆盖，请不要手动改。
@@ -125,7 +176,7 @@ sessionInit:
   enabled: $(bool $PROXY_ENABLE_SESSION_INIT)
   maxRetries: 3
   injectAgentContext: true
-  injectTaskContext: true
+  injectTaskContext: true${SESSION_INIT_EXTRA}
   headerAutoSelect:
     enabled: true
     teamHeader: "x-team-id"
@@ -143,19 +194,22 @@ injection:
   injectors:
     - skill
     - knowledge
-    - tdai-memory
+    - tdai-memory${INJECTION_EXTRA}
 
 redis:
-  enabled: false
+  enabled: false${STORAGE_YAML}${CREDIT_YAML}
 YAML
 
 info "启动 proxy (image=$PROXY_IMAGE, port=$PROXY_PORT)"
 $DOCKER run -d --name "$CONTAINER" \
+  --restart "${PROXY_RESTART_POLICY:-unless-stopped}" \
   --network "$NETWORK" \
   --network-alias proxy \
   --add-host=host.docker.internal:host-gateway \
-  -p "${PROXY_PORT}:8096" \
+  -p "${PROXY_BIND_HOST:-0.0.0.0}:${PROXY_PORT}:8096" \
   -v "$CONFIG_FILE:/data/config.yaml:ro" \
+  "${SRC_MOUNT_ARGS[@]+"${SRC_MOUNT_ARGS[@]}"}" \
+  "${RUN_VOLUME_ARGS[@]+"${RUN_VOLUME_ARGS[@]}"}" \
   "$PROXY_IMAGE" >/dev/null
 
 wait_healthy "$CONTAINER" 90
