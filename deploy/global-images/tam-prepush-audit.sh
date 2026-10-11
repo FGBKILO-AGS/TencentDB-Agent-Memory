@@ -30,14 +30,27 @@ echo "commits=$NCOMMIT blobs_to_scan=$NBLOBS base=$BASE"
 [ "$NCOMMIT" -gt 0 ] || { echo "ABORT: 0 个提交，没有可推的东西"; exit 2; }
 
 FAIL=0
+# 表格只两列、以第一个 `|` 切：模式里本来就有 `|`（如 (team|usr|agt)-…），
+# 三列切分会把它劈断，grep 报 Unmatched ( 而计数落成**假零**（这版被自己绊过一次）。
 while IFS='|' read -r label ere; do
+  [ -n "$label" ] || continue
   hits="$(while read -r o; do
             git cat-file blob "$o" 2>/dev/null | grep -nE "$ere" | sed "s|^|${o:0:8} |"
           done < "$TMP")"
+  # 占位符不算命中：同字符连号（agt-xxxxxxxxxx / usr-0000000000）是我自己写的示例。
+  # 不剔掉的话闸长期红着，而长期红着的闸等于没有闸。真 id 是混合字符，不会被这条放过。
+  if [ "$label" = LOCAL_ID_SHAPE ] && [ -n "$hits" ]; then
+    hits="$(printf '%s\n' "$hits" | grep -vE '(team|usr|agt)-([a-z0-9])\2{9}')"
+  fi
   c=0; [ -n "$hits" ] && c="$(printf '%s\n' "$hits" | grep -c .)"
   printf '  %-18s %s\n' "$label" "$c"
-  if [ "$c" -gt 0 ]; then
+  # USERKEY_FIELD 只作提示：`x-tdai-user-key` / `PROXY_USER_KEY` 是公开的头名/变量名，
+  # 上游代码里本来就成片出现，把它算成失败会让闸长期红着（长期红 = 没人看 = 没有闸）。
+  # 真正要拦的是"名字像 key 且后面跟着一个真值"，那由 SECRET_SHAPE 覆盖。
+  if [ "$c" -gt 0 ] && [ "$label" != USERKEY_FIELD ]; then
     FAIL=1
+  fi
+  if [ "$c" -gt 0 ]; then
     printf '%s\n' "$hits" | head -5 | sed -E \
       -e 's/sk-[A-Za-z0-9]{12,}/sk-****(redacted)/g' \
       -e 's/(team|usr|agt)-[a-z0-9]{8,}/\1-****/g' \
