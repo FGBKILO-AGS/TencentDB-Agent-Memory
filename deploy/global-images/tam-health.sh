@@ -185,6 +185,21 @@ except Exception: print(-1)' 2>/dev/null)"
   esac
 fi
 
+# 本节的 WARN 是"未判"而不是"坏了"，但只说"窗口内没有"会误导：分不清"没人用客户端"
+# 和"客户端链路断了"。这里回到 24h 找最后一条真实桌面记录并算出年龄，
+# 让操作者自己判断要不要补一发（年龄大于容器重建时间 ⇒ 重建后确实没验过）。
+last_desktop_age() {
+  local ts then now
+  ts="$(docker logs --timestamps --since 24h tdai-proxy 2>&1 | tr -d '\r' \
+        | grep 'injection-debug' | grep -E 'conversationId=session-[0-9a-f]{8}-' \
+        | tail -1 | awk '{print $1}')"
+  if [ -z "$ts" ]; then echo "24h 内无任何桌面记录"; return; fi
+  then="$(printf '%s' "$ts" | sed -E 's/^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}).*/\1Z/' | xargs -I{} date -d {} +%s 2>/dev/null)"
+  if [ -z "$then" ]; then echo "最后一条桌面记录时间戳解析失败（原始值 $ts）"; return; fi
+  now="$(date +%s)"
+  echo "最后一条桌面记录在 $(( (now - then) / 3600 ))h$(( ((now - then) % 3600) / 60 ))m 前（$ts）"
+}
+
 head2 "7. 真实 DSH 客户端发的对话是否走了记忆（最近 30 分钟）"
 # 从 Proxy 日志反查真实 GUI 请求：关键看 conversationId 是否为 null。
 #   conversationId=<sid> 且配 non-null → 注入已生效
@@ -195,7 +210,7 @@ head2 "7. 真实 DSH 客户端发的对话是否走了记忆（最近 30 分钟�
 RECENT="$(docker logs --since 30m tdai-proxy 2>&1 | tr -d '\r' \
           | grep 'injection-debug' | grep 'injectedSkipped=' | tail -20)"
 if [ -z "$RECENT" ]; then
-  warn "最近 30 分钟 Proxy 未收到任何真实请求 —— 请在 DSH 里发一句话后重跑本脚本"
+  warn "最近 30 分钟 Proxy 未收到任何真实请求 —— 请在 DSH 里发一句话后重跑本脚本（$(last_desktop_age)）"
 else
   # 只认桌面真实会话（conversationId=session-<uuid>）。自检/脚本探针的
   # session-tamhealth-* 不算客户端证据，否则本脚本会给自己发绿。
@@ -217,7 +232,7 @@ else
   else
     # 窗口里只有脚本/自检探针（本脚本自己的 session-tamhealth-* 也算）——
     # 这既不是"注入坏了"也不能拿来当客户端证据，只能算未判。
-    warn "最近 30 分钟无桌面真实会话流量可判（$TOTAL 条全是脚本/自检探针）—— 在 DSH 里发一句话后重跑"
+    warn "最近 30 分钟无桌面真实会话流量可判（$TOTAL 条全是脚本/自检探针）—— 在 DSH 里发一句话后重跑（$(last_desktop_age)）"
   fi
 fi
 
