@@ -37,9 +37,15 @@ if [ -z "$CORE_KEY" ]; then
   echo "!! 拿不到管理面 key：export TDAI_GATEWAY_KEY=…，或确认 node 在 PATH 且 $REPO_DIR/.memory-core-config/tdai-gateway.yaml 存在"
   exit 1
 fi
-TDAI_TEAM="${TDAI_TEAM:-team-LOCALTEAM}"
-TDAI_AGENT="${TDAI_AGENT:-agt-LOCALAGENT}"
-TDAI_USER="${TDAI_USER:-usr-LOCALUSER}"
+# 身份三要素同样不许内联默认值：写死一组 team/agent/user 会让工具在"上一次那台机器"
+# 的记忆空间上跑，而且把 id 抄进可入库文件就等于把它推进公开历史
+# （2026-10-11 推前审计在 3 个 tam-* 里各逮到一组）。取值口与 key 同一个模块。
+IDENT="$(node "$REPO_DIR/tam-gateway-key.mjs" --identity 2>/dev/null)"
+if [ -z "$IDENT" ]; then
+  echo "!! 拿不到身份三要素：export TDAI_TEAM/TDAI_AGENT/TDAI_USER，或写进 $REPO_DIR/.env（已被 gitignore）"
+  exit 1
+fi
+IFS=$'\t' read -r TDAI_TEAM TDAI_AGENT TDAI_USER TDAI_AGENTS <<<"$IDENT"
 
 PASS=0; FAIL=0; WARN=0
 ok()   { printf '  \033[32m[PASS]\033[0m %s\n' "$1"; PASS=$((PASS+1)); }

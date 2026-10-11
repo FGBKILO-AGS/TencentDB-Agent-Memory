@@ -1018,7 +1018,7 @@ export async function handleAnthropicMessages(
       if (initResult.resetFlow && initResult.justRegistered && !initResult.bypassed) {
         _resetFlowResult = {
           agentName: initResult.agentDetail?.name ?? "未知",
-          // agentIdShort 字段名沿用历史，但此处**存完整 agent_id**（如 agt-LOCALAGENT4）。
+          // agentIdShort 字段名沿用历史，但此处**存完整 agent_id**（如 agt-xxxxxxxxxx）。
           // 之前 slice(-8) 会截断成 "elthr7yn" 用户看不懂，与 team 截断问题对称。
           agentIdShort: (initResult.sessionInfo as Record<string, unknown>)?.agent_id
             ? String((initResult.sessionInfo as Record<string, unknown>).agent_id) : "",

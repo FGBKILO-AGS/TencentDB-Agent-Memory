@@ -10,13 +10,14 @@
 //        node tam-l3-reconcile.mjs --apply    # 落盘修复并复验
 import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync, rmSync } from "node:fs";
-import { gatewayKey } from "./tam-gateway-key.mjs";
+import { gatewayKey, identity } from "./tam-gateway-key.mjs";
 
 const CORE = process.env.TDAI_CORE || "http://127.0.0.1:8420";
 const KEY = gatewayKey();
-const TEAM = process.env.TDAI_TEAM || "team-LOCALTEAM";
-const AGENT = process.env.TDAI_AGENT || "agt-LOCALAGENT";
-const USER = process.env.TDAI_USER || "usr-LOCALUSER";
+const ID = identity();
+const TEAM = ID.team;
+const AGENT = ID.agent;
+const USER = ID.user;
 const CONTAINER = process.env.TDAI_CORE_CONTAINER || "tdai-memory-core";
 const PROFILE = `/data/tdai-memory/profiles/team%3A${TEAM}%7Cagent%3A${AGENT}`;
 const APPLY = process.argv.includes("--apply");
