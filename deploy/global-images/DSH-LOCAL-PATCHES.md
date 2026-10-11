@@ -45,7 +45,7 @@ admin 在 Chat_Memory 读不到 dsh 记忆的修复，源码侧在提交 `91bf4c
 
 - 落地机制：`docker cp` 进 **hub 容器可写层** → **重建 hub 容器就没了**，`docker restart` 不丢。
 - 改名禁忌：入口 bundle **不能换文件名**（懒加载 chunk 按名静态引用入口 ⇒ 换名＝两份 React/store）。
-- 备份：`<local-task-dir>\panel-live-20261010\`。
+- 备份：本机任务目录下的 `panel-live-20261010\`（绝对路径不写进仓库，见 `tam-prepush-audit.sh` 的 WORK_PATH 一类）。
 - 闸：`tam-panel-patch-present.sh`（`tam-health.sh` 第 11 节调用）。判据是哈希不等=补丁在位；
   参照物 `routes/auth.js` 必须与镜像**相等**，否则整条比对链路作废。
   ⚠ 这个闸自己一开始是坏的：参照物填了 `routes/agents.js`，那个文件容器和镜像里**都不存在**，
